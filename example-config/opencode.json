@@ -1,0 +1,13 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": [
+    [
+      "file:///D:/Users/frhae/gitProjects/_current/ctxlite/src/index.ts",
+      {
+        "tools": ["read", "edit"],
+        "logLevel": "info",
+        "preserveRecentMessages": 0
+      }
+    ]
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "name": "ctxlite",
+  "version": "0.1.0",
+  "description": "opencode plugin: invalidates stale Read/Edit tool_results to reduce token waste and context rot",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "context-management",
+    "llm",
+    "tokens"
+  ],
+  "license": "MIT",
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*",
+    "@opencode-ai/sdk": "*"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.0",
+    "@opencode-ai/plugin": "*",
+    "@opencode-ai/sdk": "*",
+    "typescript": "^5.4.0"
+  }
+}
