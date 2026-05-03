@@ -69,6 +69,7 @@ function toView(part: ToolPart & { state: ToolStateCompleted }): ToolPartView {
   return {
     tool: part.tool,
     input: part.state.input ?? {},
+    output: typeof part.state.output === "string" ? part.state.output : "",
     eligible: true,
     alreadyCompacted: typeof part.state.time.compacted === "number" && part.state.time.compacted > 0,
   }

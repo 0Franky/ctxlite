@@ -5,8 +5,12 @@
  * The plugin entrypoint adapts opencode's MessageV2/Part shapes onto these.
  */
 
-/** Tools whose tool_result content represents a file snapshot we want to manage. */
-export type FileToolKind = "read" | "edit" | "apply_patch"
+/**
+ * Tools whose tool_result content represents a file snapshot we want to manage.
+ * `"write"` is included because a write fully replaces file content, making
+ * every prior read/edit/write on the same path stale.
+ */
+export type FileToolKind = "read" | "edit" | "apply_patch" | "write"
 
 /**
  * Inclusive line range. `end === undefined` means open-ended ("until EOF").
@@ -31,10 +35,12 @@ export interface FileRef {
  * The plugin entrypoint maps opencode's ToolPart onto this shape.
  */
 export interface ToolPartView {
-  /** Tool name as registered in the registry, e.g. "read", "edit", "apply_patch". */
+  /** Tool name as registered in the registry, e.g. "read", "edit", "write", "bash". */
   readonly tool: string
   /** Parsed input the tool was invoked with. */
   readonly input: Record<string, unknown>
+  /** The text output produced by the tool call. Empty string if none. */
+  readonly output: string
   /** Whether the part is in the "completed" state and not already compacted. */
   readonly eligible: boolean
   /** Set when ctxlite (or another mechanism) already invalidated this part. */
@@ -56,6 +62,10 @@ export interface InvalidationDecision {
     | "read-superset-supersedes-prior-read"
     | "edit-supersedes-prior-edit"
     | "duplicate-read"
+    | "write-supersedes-prior"
+    | "error-superseded-by-success"
+    | "bash-error-superseded-by-success"
+    | "duplicate-bash"
 }
 
 /** Configuration honored by the plugin. */
