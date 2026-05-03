@@ -89,3 +89,109 @@ export interface ResolvedOptions {
   readonly logLevel: "silent" | "info" | "debug"
   readonly preserveRecentMessages: number
 }
+
+// ---------------------------------------------------------------------------
+// Layer C: ctxlite_dump and ctxlite_compact types
+// ---------------------------------------------------------------------------
+
+/** Human-readable flag names produced by heuristic analysis. */
+export type FlagName =
+  | "dead-reasoning"
+  | "superseded-tool-result"
+  | "large-error"
+  | "oversized-bash-output"
+  | "duplicate-text"
+// "unused-mcp-description" deferred for v1 (tool-call-counter not cheaply available)
+
+/** A part that carries one or more heuristic flags. */
+export interface FlaggedPart {
+  readonly partId: string
+  readonly messageIdx: number
+  readonly partIdx: number
+  readonly type: string
+  /** Tool name if type === "tool", else undefined. */
+  readonly tool?: string
+  readonly tokens: number
+  readonly flags: readonly FlagName[]
+  /** Short content preview (up to 200 chars). */
+  readonly preview: string
+}
+
+/** Verbosity level for dump output. */
+export type DumpVerbosity = "minimal" | "normal" | "verbose"
+
+/** Options accepted by the dump logic. */
+export interface DumpOptions {
+  readonly verbosity: DumpVerbosity
+  /** Whether to attempt startup overhead reporting. */
+  readonly include_startup: boolean
+}
+
+/** A single message-level row in the dump. */
+export interface DumpMessage {
+  readonly messageIdx: number
+  readonly messageId: string
+  readonly role: string
+  readonly parts: readonly DumpPart[]
+}
+
+/** A single part row in the dump. */
+export interface DumpPart {
+  readonly partId: string
+  readonly type: string
+  readonly tool?: string
+  readonly tokens: number
+  readonly alreadyCompacted: boolean
+  readonly flags: readonly FlagName[]
+  readonly preview: string
+}
+
+/** Fully-computed dump data (pure; no I/O). */
+export interface DumpData {
+  readonly sessionId: string
+  readonly generatedAt: number
+  readonly totalTokens: number
+  readonly usedPct: number
+  /** Hardcoded fallback context window; 200_000 if not derivable. */
+  readonly contextWindowTokens: number
+  readonly messages: readonly DumpMessage[]
+  readonly topOffenders: readonly Array<{ partId: string; tokens: number; type: string; tool?: string }>
+  readonly cleanupCandidates: readonly FlaggedPart[]
+  readonly nAlreadyCompacted: number
+}
+
+// ---------------------------------------------------------------------------
+// Layer C: ctxlite_compact types
+// ---------------------------------------------------------------------------
+
+/** Filter criteria for selecting parts to compact. */
+export interface CompactFilter {
+  readonly type?: "text" | "reasoning" | "tool_use" | "tool_result"
+  readonly tool?: string
+  readonly olderThanMessages?: number
+  readonly largerThanTokens?: number
+  readonly flaggedAs?: readonly string[]
+}
+
+/** Selector used by ctxlite_compact. */
+export interface CompactSelector {
+  readonly partIds?: readonly string[]
+  readonly filter?: CompactFilter
+}
+
+/** An item in the compaction plan with rationale. */
+export interface CompactPlanItem {
+  readonly part_id: string
+  readonly type: string
+  readonly tokens: number
+  readonly reason: string
+}
+
+/** Result of planCompaction: what would be (or was) compacted. */
+export interface CompactionPlan {
+  readonly affectedItems: readonly CompactPlanItem[]
+  readonly tokensRecoveredEstimate: number
+  /** True if massive-op guard was triggered. */
+  readonly requiresConfirmation: boolean
+  readonly confirmationMessage?: string
+}
