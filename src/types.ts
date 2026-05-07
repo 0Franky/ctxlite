@@ -78,16 +78,32 @@ export interface CtxliteOptions {
   /** Verbosity. `"silent"` suppresses all output. */
   readonly logLevel?: "silent" | "info" | "debug"
   /**
-   * Skip tool_results within the most recent N messages. Default 0
-   * (only the part being constructed is implicitly skipped via `eligible`).
+   * Skip tool_results within the most recent N messages. Default 0.
    */
   readonly preserveRecentMessages?: number
+  /**
+   * Skip tool_results within the OLDEST N messages. Default 0.
+   *
+   * Cache-friendly knob: Anthropic prompt cache is byte-identical-prefix.
+   * Mutating an old part shifts the prefix and invalidates every breakpoint
+   * past it. Setting this to ~the position of the last cache breakpoint
+   * (typically `system + tools + ~6 messages`) keeps the cache hot.
+   */
+  readonly preserveOldestMessages?: number
+  /**
+   * Don't run the transform hook until the session has at least N messages.
+   * Default 0. Lets the cache warm up before ctxlite starts taking bites
+   * out of it. Reasonable values: 4–10.
+   */
+  readonly minMessagesForActivation?: number
 }
 
 export interface ResolvedOptions {
   readonly tools: ReadonlySet<string>
   readonly logLevel: "silent" | "info" | "debug"
   readonly preserveRecentMessages: number
+  readonly preserveOldestMessages: number
+  readonly minMessagesForActivation: number
 }
 
 // ---------------------------------------------------------------------------

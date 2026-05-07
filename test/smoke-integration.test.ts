@@ -231,6 +231,62 @@ describe("smoke: end-to-end plugin invocation against real SDK types", () => {
     ).resolves.toBeUndefined()
   })
 
+  test("preserveOldestMessages: parts in the protected oldest window are never compacted", async () => {
+    const sessionID = "sess_smoke_oldest"
+    const messages = [
+      buildAssistantMessage({
+        sessionID,
+        parts: [{ tool: "read", input: { filePath: "/tmp/k.ts" }, output: "v1" }],
+      }),
+      buildAssistantMessage({
+        sessionID,
+        parts: [{ tool: "edit", input: { filePath: "/tmp/k.ts", oldString: "X", newString: "Y" }, output: "diff" }],
+      }),
+      buildAssistantMessage({
+        sessionID,
+        parts: [{ tool: "read", input: { filePath: "/tmp/k.ts" }, output: "v2" }],
+      }),
+    ]
+
+    const r1CallID = (messages[0].parts[0] as ToolPart).callID
+    const e1CallID = (messages[1].parts[0] as ToolPart).callID
+
+    // Protect the first 2 messages: the read+edit pair must stay live even
+    // though the read would normally be invalidated.
+    const hook = await loadHook({ preserveOldestMessages: 2, logLevel: "silent" })
+    await hook({}, { messages })
+
+    const r1 = findPart(messages, r1CallID)
+    const e1 = findPart(messages, e1CallID)
+    expect((r1?.state as ToolStateCompleted).time.compacted).toBeUndefined()
+    expect((e1?.state as ToolStateCompleted).time.compacted).toBeUndefined()
+  })
+
+  test("minMessagesForActivation: hook is a no-op below threshold", async () => {
+    const sessionID = "sess_smoke_min"
+    const messages = [
+      buildAssistantMessage({
+        sessionID,
+        parts: [{ tool: "read", input: { filePath: "/tmp/m.ts" }, output: "v1" }],
+      }),
+      buildAssistantMessage({
+        sessionID,
+        parts: [{ tool: "edit", input: { filePath: "/tmp/m.ts", oldString: "X", newString: "Y" }, output: "diff" }],
+      }),
+    ]
+
+    const hook = await loadHook({ minMessagesForActivation: 5, logLevel: "silent" })
+    await hook({}, { messages })
+
+    for (const msg of messages) {
+      for (const part of msg.parts) {
+        if (part.type === "tool" && part.state.status === "completed") {
+          expect(part.state.time.compacted).toBeUndefined()
+        }
+      }
+    }
+  })
+
   test("non-completed parts (running tool calls) are ignored", async () => {
     const sessionID = "sess_smoke_5"
     const m1 = buildAssistantMessage({

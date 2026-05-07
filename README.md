@@ -79,6 +79,40 @@ All options are optional; defaults are applied when omitted.
 | `tools` | `string[]` | `["read", "edit"]` | Tool names whose tool_results ctxlite analyzes. Empty array falls back to defaults. |
 | `logLevel` | `"silent" \| "info" \| "debug"` | `"info"` | Verbosity. `info` logs one line per turn when invalidations occur. `debug` also logs no-op turns. |
 | `preserveRecentMessages` | `number` | `0` | Number of most-recent messages whose ToolParts ctxlite skips entirely. Defensive option for users who fear race conditions; the default is fine. |
+| `preserveOldestMessages` | `number` | `0` | Number of OLDEST messages whose ToolParts ctxlite never touches. **Cache-friendly knob** — see "Prompt cache trade-off" below. |
+| `minMessagesForActivation` | `number` | `0` | Don't run the transform hook until the session has at least N messages. Lets the prompt cache warm up before ctxlite starts taking bites out of it. |
+
+## Prompt cache trade-off
+
+ctxlite mutates `state.time.compacted` on **past** tool_results — meaning the byte-prefix of the messages payload changes between turns. Anthropic's prompt cache is byte-identical-prefix: any mutation past a cache breakpoint invalidates everything after it.
+
+Concretely: every Edit/Write that supersedes a prior Read forces a cache miss from the position of that Read in the history. In a session with ~10 Edits over 50 turns, this can amount to **hundreds of thousands of input-equivalent tokens** of extra cost (cache-write at 1.25× instead of cache-read at 0.1×).
+
+ctxlite still wins overall when:
+- the same large file is read+edited multiple times (prefix shrinks more than the miss costs),
+- the session is long enough to amortize the misses,
+- token-window pressure matters more than per-turn latency.
+
+ctxlite loses when:
+- the session is short (< 20 turns), few files, sparse edits — you pay misses without recouping,
+- you're in a tight edit/test loop (cache invalidated every 1–2 turns).
+
+### Cache-friendly configuration
+
+The two knobs `preserveOldestMessages` and `minMessagesForActivation` let you carve out a stable prefix that ctxlite never mutates, so the cache stays hot for the bulk of the conversation.
+
+A reasonable starting point for cache-sensitive sessions:
+
+```json
+{
+  "preserveOldestMessages": 6,
+  "minMessagesForActivation": 8
+}
+```
+
+Translation: ctxlite stays silent for the first 8 messages, then starts pruning — but only on messages 7 and later. The first 6 messages (typically: bootstrap, initial reads, plan) remain a stable cached prefix.
+
+If you don't care about the prompt cache (e.g. local model, no cache pricing), leave both at `0`.
 
 ## Verifying it works
 
@@ -118,11 +152,34 @@ src/
 ## Tests
 
 ```bash
-bun test         # unit tests
-bun run typecheck
+bun install        # install dev deps (first time only)
+bun test           # run the full suite
+bun run typecheck  # typecheck only
 ```
 
-35 tests cover: range arithmetic, path normalization (Unix + Windows), the four primary invalidation scenarios, idempotency, edge cases (compacted Edits, untracked tools, in-flight tool calls, empty input, path independence).
+**85 tests across 8 files.** One pre-existing failure on `duplicate-bash` (fixture shares `messageIdx`, unrelated to recent changes); the remaining 84 pass.
+
+| File | Coverage |
+|------|----------|
+| `extract-path.test.ts` | path normalization (Unix + Windows drives), range arithmetic, isErrorOutput precision |
+| `invalidation.test.ts` | the four primary invalidation reasons (`edit-supersedes-prior-read`, `read-superset-supersedes-prior-read`, `duplicate-read`, `write-supersedes-prior`), idempotency, untracked-tool isolation |
+| `layer-b.test.ts` | bash-side detectors (`bash-error-superseded-by-success`, `duplicate-bash`, `error-superseded-by-success` for read) |
+| `selector.test.ts` | `matchSelector` filters: type, tool, olderThanMessages, largerThanTokens, flaggedAs, partIds intersection |
+| `compact-on-demand.test.ts` | `planCompaction` safety set, massive-op confirmation guard, tokens-recovered estimate |
+| `flag-heuristics.test.ts` | dead-reasoning, superseded-tool-result, large-error, oversized-bash-output, duplicate-text |
+| `smoke-integration.test.ts` | end-to-end against real `@opencode-ai/sdk` types: read→edit→read mutation, idempotency, fail-open on malformed input, running-tool isolation, **`preserveOldestMessages`**, **`minMessagesForActivation`** |
+| `cache-friendly.test.ts` | exhaustive matrix for the cache-friendly knobs: protected-prefix invariant, warm-up gate, knob interaction grid (8 combinations), invalid-input coercion, byte-stable re-runs |
+
+### What the tests verify
+
+- **Pure logic** (no SDK dep): every invalidation rule, every flag heuristic, every selector branch.
+- **SDK contract**: smoke tests use the real `@opencode-ai/sdk` types and run the plugin's `server()` factory exactly as opencode would. If the SDK shape drifts, tests break.
+- **Cache invariants**: `cache-friendly.test.ts` asserts that `preserveOldestMessages=N` keeps the prefix byte-identical across re-runs, and that `minMessagesForActivation=K` produces zero mutations until the threshold.
+- **Idempotency**: multiple test files re-invoke the hook on already-processed history and assert no further mutations.
+
+### Adding a test
+
+Tests use `bun:test` (Jest-compatible API). Pure-logic tests use the fixtures in `test/fixtures.ts`; integration tests build SDK-shaped values inline (see `smoke-integration.test.ts`). Keep new tests under `test/` — `bun test` discovers `**/*.test.ts` automatically.
 
 ## License
 

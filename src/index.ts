@@ -52,6 +52,12 @@ const DEFAULT_LOG_LEVEL: ResolvedOptions["logLevel"] = "info"
 /** Dump files older than 7 days are deleted at boot (TTL cleanup). */
 const DUMP_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
+function nonNegativeInt(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : 0
+}
+
 function resolveOptions(raw: PluginOptions | undefined): ResolvedOptions {
   const opts = (raw ?? {}) as Partial<CtxliteOptions> & Record<string, unknown>
 
@@ -67,14 +73,13 @@ function resolveOptions(raw: PluginOptions | undefined): ResolvedOptions {
       ? opts.logLevel
       : DEFAULT_LOG_LEVEL
 
-  const preserveRecent =
-    typeof opts.preserveRecentMessages === "number" &&
-    Number.isFinite(opts.preserveRecentMessages) &&
-    opts.preserveRecentMessages >= 0
-      ? Math.floor(opts.preserveRecentMessages)
-      : 0
-
-  return { tools, logLevel, preserveRecentMessages: preserveRecent }
+  return {
+    tools,
+    logLevel,
+    preserveRecentMessages: nonNegativeInt(opts.preserveRecentMessages),
+    preserveOldestMessages: nonNegativeInt(opts.preserveOldestMessages),
+    minMessagesForActivation: nonNegativeInt(opts.minMessagesForActivation),
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -102,10 +107,12 @@ function toView(part: ToolPart & { state: ToolStateCompleted }): ToolPartView {
 function collectAnalyzerInputs(
   messages: ReadonlyArray<{ readonly parts: ReadonlyArray<Part> }>,
   preserveRecentMessages: number,
+  preserveOldestMessages: number,
 ): AnalyzerInput[] {
   const out: AnalyzerInput[] = []
-  const cutoff = Math.max(0, messages.length - preserveRecentMessages)
-  for (let mi = 0; mi < cutoff; mi++) {
+  const start = Math.min(preserveOldestMessages, messages.length)
+  const end = Math.max(start, messages.length - preserveRecentMessages)
+  for (let mi = start; mi < end; mi++) {
     const msg = messages[mi]
     if (msg === undefined) continue
     const parts = msg.parts
@@ -335,7 +342,10 @@ const server: Plugin = async (input: PluginInput, rawOptions?: PluginOptions): P
   log(
     options.logLevel,
     "info",
-    `loaded — tools=[${[...options.tools].join(",")}] preserveRecent=${options.preserveRecentMessages}`,
+    `loaded — tools=[${[...options.tools].join(",")}] ` +
+      `preserveRecent=${options.preserveRecentMessages} ` +
+      `preserveOldest=${options.preserveOldestMessages} ` +
+      `minActivation=${options.minMessagesForActivation}`,
   )
 
   // Boot-time TTL cleanup (fail-open, async fire-and-forget).
@@ -349,7 +359,20 @@ const server: Plugin = async (input: PluginInput, rawOptions?: PluginOptions): P
       try {
         if (!output || !Array.isArray(output.messages) || output.messages.length === 0) return
 
-        const inputs = collectAnalyzerInputs(output.messages, options.preserveRecentMessages)
+        if (output.messages.length < options.minMessagesForActivation) {
+          log(
+            options.logLevel,
+            "debug",
+            `skipped — ${output.messages.length} messages < minMessagesForActivation=${options.minMessagesForActivation}`,
+          )
+          return
+        }
+
+        const inputs = collectAnalyzerInputs(
+          output.messages,
+          options.preserveRecentMessages,
+          options.preserveOldestMessages,
+        )
         if (inputs.length === 0) return
 
         const decisions = decideInvalidations(inputs, options)
