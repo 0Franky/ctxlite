@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "mcp__plugin_telegram_telegram__reply",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(npm install *)",
+      "Bash(node --test test/)",
+      "Bash(echo \"Exit code: $?\")",
+      "Bash(git *)",
+      "Bash(node --test --help)",
+      "Bash(node -e \"console.log\\('node --test behavior check'\\)\")",
+      "Bash(node --test \"C:/Users/Giuse/OneDrive/Desktop/ctx-2.0/ag-mcp-server/test/**/*.test.js\")",
+      "Bash(node *)",
+      "Bash(npm test *)",
+      "Bash(bun test *)",
+      "Bash(xargs ls *)",
+      "Bash(xargs grep *)",
+      "Bash(bun pm *)",
+      "Bash(bun --eval \"import\\('@opencode-ai/plugin'\\)\")",
+      "Bash(bun run *)",
+      "Bash(bun --eval \"import\\('@opencode-ai/plugin'\\).then\\(m => console.log\\(Object.keys\\(m\\)\\)\\).catch\\(e => console.log\\(e.message\\)\\)\")",
+      "Bash(bun -e \"import { tool } from '@opencode-ai/plugin'; console.log\\(typeof tool\\)\")",
+      "Bash(bun -e \"import plugin from '@opencode-ai/plugin'; console.log\\(Object.keys\\(plugin\\)\\)\")",
+      "Bash(bun -e \"import\\('@opencode-ai/plugin'\\).then\\(m => console.log\\('ok'\\)\\).catch\\(e => console.log\\('err:', e.message\\)\\)\")",
+      "Bash(bun -e \"import './src/index.ts'\")",
+      "Bash(bun -e \"import p from './src/index.ts'; console.log\\(typeof p.server\\)\")",
+      "Bash(bun -e \"import { tool } from '@opencode-ai/plugin'; const t = tool\\({ description: 'test', args: { x: tool.schema.string\\(\\) }, execute: async \\(\\) => 'ok' }\\); console.log\\(typeof t\\)\")",
+      "Bash(bun install *)"
+    ]
+  }
+}

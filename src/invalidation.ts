@@ -101,10 +101,18 @@ export function decideInvalidations(parts: readonly AnalyzerInput[], options: Re
           state.erroredLocations = []
         }
 
-        // Detector: duplicate-bash — if same non-empty output seen before, invalidate priors
+        // Detector: duplicate-bash — if same non-empty output seen in an adjacent
+        // message (within 2 indices), invalidate the prior. Non-adjacent duplicates
+        // are preserved: the same command run far apart likely had different intent.
         const survivingLive: typeof state.liveEntries = []
         for (const prior of state.liveEntries) {
-          if (prior.output === view.output && prior.output.length > 0) {
+          const distance = location.messageIdx - prior.location.messageIdx
+          if (
+            distance > 0 &&
+            distance <= 2 &&
+            prior.output === view.output &&
+            prior.output.length > 0
+          ) {
             decisions.push({ location: prior.location, reason: "duplicate-bash" })
           } else {
             survivingLive.push(prior)

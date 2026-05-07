@@ -37,9 +37,16 @@ export function planCompaction(
   // Step 2: apply safety invariant — exclude protected parts even if listed.
   const safeAffected = matched.filter((p) => !protectedPartIds.has(p.partId))
 
+  // Only tool_result parts support the state.time.compacted mutation.
+  // Text and reasoning parts cannot be compacted with the current mechanism,
+  // so we compute two totals: one for the massive-op guard (all parts,
+  // conservative) and one for the honest token estimate (compactable only).
   const totalTokens = safeAffected.reduce((s, p) => s + p.tokens, 0)
+  const compactableTokens = safeAffected
+    .filter((p) => p.type === "tool_result")
+    .reduce((s, p) => s + p.tokens, 0)
 
-  // Step 3: massive-op guard.
+  // Step 3: massive-op guard (uses all parts for safety).
   const isMassive =
     safeAffected.length > LARGE_OP_PART_THRESHOLD || totalTokens > LARGE_OP_TOKEN_THRESHOLD
 
@@ -55,7 +62,7 @@ export function planCompaction(
     }))
     return {
       affectedItems: items,
-      tokensRecoveredEstimate: totalTokens,
+      tokensRecoveredEstimate: compactableTokens,
       requiresConfirmation: true,
       confirmationMessage: message,
     }
@@ -70,7 +77,7 @@ export function planCompaction(
 
   return {
     affectedItems: items,
-    tokensRecoveredEstimate: totalTokens,
+    tokensRecoveredEstimate: compactableTokens,
     requiresConfirmation: false,
   }
 }

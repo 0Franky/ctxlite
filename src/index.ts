@@ -123,6 +123,15 @@ function collectAnalyzerInputs(
   return out
 }
 
+/**
+ * Apply invalidation decisions by mutating part state in-place.
+ * 
+ * WARNING: This depends on the experimental `chat.messages.transform` hook 
+ * passing the same object references (not deep copies). If the opencode 
+ * framework changes semantics, mutations become silent no-ops.
+ * Mitigation: we return `mutations` count; the caller can detect zero
+ * mutations and log a warning.
+ */
 function applyDecisions(
   messages: ReadonlyArray<{ readonly parts: ReadonlyArray<Part> }>,
   decisions: ReadonlyArray<{ readonly location: { messageIdx: number; partIdx: number } }>,
@@ -250,7 +259,9 @@ function buildProtectedSet(
       } else {
         const ref = extractFileRef(part.tool, part.state.input)
         if (ref !== null) {
-          const key = `${part.tool}:${ref.path}`
+          // Use only path as key (not tool:path), consistent with Phase 1/2
+          // where an edit on a path supersedes prior reads on the same path.
+          const key = ref.path
           lastLiveByFileKey.set(key, partId)
         }
       }
@@ -544,10 +555,37 @@ const server: Plugin = async (input: PluginInput, rawOptions?: PluginOptions): P
               })
             }
 
-            // Apply: mutate state.time.compacted on targeted parts.
+            // Persist via direct HTTP PATCH to opencode API.
+            // v1 SDK exposes input.client._client (with patch/delete/get/post).
+            // v2 SDK exposes input.client.client (with patch/delete/get/post).
             const now = Date.now()
             let compacted = 0
+            let persisted = 0
             const targetIds = new Set(plan.affectedItems.map((i) => i.part_id))
+            // Resolve HTTP client (SDK internal, fragile across versions).
+            // v1: input.client._client, v2: input.client.client.
+            const raw = input.client as unknown as {
+              _client?: { patch: Function }
+              client?: { patch: Function }
+            }
+            const http = raw._client ?? raw.client
+
+            // Guard: if no HTTP client found, abort non-dry-run compaction.
+            if (!dryRun && (!http || typeof http.patch !== "function")) {
+              return JSON.stringify({
+                error: "Cannot apply compaction: no HTTP client available in SDK",
+                _diag: {
+                  http_available: !!http,
+                  http_has_patch: typeof http?.patch === "function",
+                  session_id: sessionId,
+                  _note: raw._client
+                    ? "v1 (using _client)"
+                    : raw.client
+                      ? "v2 (using client)"
+                      : "ERROR: no HTTP client found",
+                },
+              })
+            }
 
             for (const msg of rawMessages) {
               for (const part of msg.parts) {
@@ -556,21 +594,65 @@ const server: Plugin = async (input: PluginInput, rawOptions?: PluginOptions): P
                 if (!targetIds.has(partId)) continue
                 if (typeof part.state.time.compacted === "number" && part.state.time.compacted > 0)
                   continue
+
+                // Persist via HTTP PATCH FIRST, then mutate local copy.
+                // This prevents inconsistency where local state shows compacted
+                // but the server never received the update (PATCH failure).
+                // Send only the state delta (not the full Part with large output).
+                if (http?.patch) {
+                  const patchBody = {
+                    state: {
+                      time: { compacted: now },
+                    },
+                  }
+                  try {
+                    await http.patch({
+                      url: `/session/${sessionId}/message/${msg.info.id}/part/${partId}`,
+                      body: patchBody,
+                      headers: { "Content-Type": "application/json" },
+                    })
+                    persisted++
+                  } catch (updateErr) {
+                    console.error(
+                      `ctxlite_compact: failed to persist part ${partId}:`,
+                      updateErr instanceof Error ? updateErr.message : String(updateErr),
+                    )
+                    continue  // Skip local mutation on PATCH failure
+                  }
+                }
+
+                // PATCH succeeded (or no HTTP client in dry-run) → mutate local.
                 part.state.time.compacted = now
                 compacted++
               }
             }
 
+            // Note on HTTP client: the access pattern here (input.client._client vs .client)
+            // depends on opencode SDK internals and may break on SDK major version bumps.
+            // If the PATCH endpoint changes, the _diag field in the response will show
+            // `http_available: false` and compaction will be skipped.
+
             log(
               options.logLevel,
               "info",
-              `ctxlite_compact: applied ${compacted} compaction(s), ~${plan.tokensRecoveredEstimate} tokens recovered`,
+              `ctxlite_compact: applied ${compacted} compaction(s), ${persisted} persisted, ~${plan.tokensRecoveredEstimate} tokens recovered`,
             )
 
             return JSON.stringify({
               mode: "applied",
               compacted,
+              persisted,
               tokens_recovered_estimate: plan.tokensRecoveredEstimate,
+              _diag: {
+                http_available: !!http,
+                http_has_patch: typeof http?.patch === "function",
+                session_id: sessionId,
+                _note: raw._client
+                  ? "v1 (using _client)"
+                  : raw.client
+                    ? "v2 (using client)"
+                    : "ERROR: no HTTP client found",
+              },
             })
           } catch (err) {
             return JSON.stringify({

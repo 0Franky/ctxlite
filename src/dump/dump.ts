@@ -162,7 +162,13 @@ export function buildDump(
     if (p.alreadyCompacted) nAlreadyCompacted++
   }
 
-  // --- build message/part tree ----------------------------------------------
+  // --- build message/part tree (O(N) with Map index) -----------------------
+  // Build a Map keyed on "messageIdx:partIdx" for O(1) lookup instead of O(N²) find().
+  const partIndex = new Map<string, typeof flatParts[number]>()
+  for (const fp of flatParts) {
+    partIndex.set(`${fp.messageIdx}:${fp.partIdx}`, fp)
+  }
+
   const dumpMessages: DumpMessage[] = []
   for (let mi = 0; mi < messages.length; mi++) {
     const msg = messages[mi]
@@ -171,7 +177,7 @@ export function buildDump(
     for (let pi = 0; pi < msg.parts.length; pi++) {
       const p = msg.parts[pi]
       if (p === undefined) continue
-      const fp = flatParts.find((x) => x.messageIdx === mi && x.partIdx === pi)
+      const fp = partIndex.get(`${mi}:${pi}`)
       if (fp === undefined) continue
       const tokens = tokensByPartId.get(fp.partId) ?? 0
       const partFlags = [...(flagMap.get(fp.partId) ?? [])] as FlagName[]

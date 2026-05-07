@@ -42,6 +42,11 @@ export type FlagMap = Map<string, Set<string>>
  * non-error output). The heuristic: if the AI reasoned but produced no
  * artifact within 10 messages, that reasoning chain is unlikely to be
  * referenced again.
+ *
+ * IMPORTANT: All flags are computed fresh on each dump call — they are
+ * NOT persisted. A "dead-reasoning" flag may disappear in a later dump if
+ * productive tool calls are added within 10 messages of the reasoning part.
+ * Think of flags as a current-state diagnostic, not a historical record.
  */
 export function flagDeadReasoning(parts: readonly FlatPart[], flags: FlagMap): void {
   // Build an index: messageIdx → does the message contain a "productive" tool call?
@@ -60,9 +65,10 @@ export function flagDeadReasoning(parts: readonly FlatPart[], flags: FlagMap): v
     if (p.type !== "reasoning") continue
     if (p.alreadyCompacted) continue
 
-    // Check the next 10 message indices after the reasoning part's message.
+    // Check if there's a productive tool call in the same message
+    // or in the next 9 messages after the reasoning part.
     let hasFollowUp = false
-    for (let delta = 1; delta <= 10; delta++) {
+    for (let delta = 0; delta <= 10; delta++) {
       if (productiveMessages.has(p.messageIdx + delta)) {
         hasFollowUp = true
         break
