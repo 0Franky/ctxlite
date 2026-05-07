@@ -96,6 +96,13 @@ export interface CtxliteOptions {
    * out of it. Reasonable values: 4–10.
    */
   readonly minMessagesForActivation?: number
+  /**
+   * Override the on-disk path of the compaction registry. Default:
+   * `~/.ctxlite/compactions.json`. The registry is what makes
+   * `ctxlite_compact` persistent across turns and restarts on every
+   * platform (desktop, web), independent of opencode's HTTP API.
+   */
+  readonly registryPath?: string
 }
 
 export interface ResolvedOptions {
@@ -104,6 +111,7 @@ export interface ResolvedOptions {
   readonly preserveRecentMessages: number
   readonly preserveOldestMessages: number
   readonly minMessagesForActivation: number
+  readonly registryPath: string
 }
 
 // ---------------------------------------------------------------------------

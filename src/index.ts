@@ -43,6 +43,14 @@ import { serializeJson } from "./dump/format-json.ts"
 import { estimateTokens } from "./dump/token-estimate.ts"
 import { type SelectablePart, normalizePartType } from "./compact/selector.ts"
 import { planCompaction } from "./compact/compact-on-demand.ts"
+import {
+  addToRegistry,
+  cleanupOldEntries,
+  defaultRegistryPath,
+  getCompactedForSession,
+  loadRegistry,
+  saveRegistry,
+} from "./registry.ts"
 
 // ---------------------------------------------------------------------------
 // Option resolution (Phase 1/2)
@@ -51,6 +59,8 @@ import { planCompaction } from "./compact/compact-on-demand.ts"
 const DEFAULT_LOG_LEVEL: ResolvedOptions["logLevel"] = "info"
 /** Dump files older than 7 days are deleted at boot (TTL cleanup). */
 const DUMP_TTL_MS = 7 * 24 * 60 * 60 * 1000
+/** Registry sessions older than 30 days are pruned at boot. */
+const REGISTRY_TTL_MS = 30 * 24 * 60 * 60 * 1000
 
 function nonNegativeInt(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
@@ -73,12 +83,18 @@ function resolveOptions(raw: PluginOptions | undefined): ResolvedOptions {
       ? opts.logLevel
       : DEFAULT_LOG_LEVEL
 
+  const registryPath =
+    typeof opts.registryPath === "string" && opts.registryPath.length > 0
+      ? opts.registryPath
+      : defaultRegistryPath()
+
   return {
     tools,
     logLevel,
     preserveRecentMessages: nonNegativeInt(opts.preserveRecentMessages),
     preserveOldestMessages: nonNegativeInt(opts.preserveOldestMessages),
     minMessagesForActivation: nonNegativeInt(opts.minMessagesForActivation),
+    registryPath,
   }
 }
 
@@ -128,6 +144,54 @@ function collectAnalyzerInputs(
     }
   }
   return out
+}
+
+/**
+ * Extract the sessionID from the message payload. The transform hook input
+ * doesn't carry it directly, but every Message and ToolPart in opencode
+ * includes a sessionID field. Returns null if no message exposes one (very
+ * unusual; the plugin then skips registry replay for that turn).
+ */
+function extractSessionID(
+  messages: ReadonlyArray<{ readonly info?: { readonly sessionID?: string }; readonly parts: ReadonlyArray<Part> }>,
+): string | null {
+  for (const msg of messages) {
+    const fromInfo = msg.info?.sessionID
+    if (typeof fromInfo === "string" && fromInfo.length > 0) return fromInfo
+    for (const part of msg.parts) {
+      const sid = (part as unknown as { sessionID?: unknown }).sessionID
+      if (typeof sid === "string" && sid.length > 0) return sid
+    }
+  }
+  return null
+}
+
+/**
+ * Apply pending compactions from the registry by mutating part state
+ * in-place on the payload that opencode is about to send to the provider.
+ *
+ * Like `applyDecisions`, this depends on the transform hook receiving the
+ * same object references opencode will then serialize — proven by the
+ * smoke tests against the real SDK shape.
+ */
+function applyRegistryCompactions(
+  messages: ReadonlyArray<{ readonly parts: ReadonlyArray<Part> }>,
+  pendingPartIds: ReadonlySet<string>,
+): number {
+  if (pendingPartIds.size === 0) return 0
+  const now = Date.now()
+  let applied = 0
+  for (const msg of messages) {
+    for (const part of msg.parts) {
+      if (!isToolPart(part) || !isCompleted(part)) continue
+      const partId = (part as unknown as { id?: string }).id
+      if (typeof partId !== "string" || !pendingPartIds.has(partId)) continue
+      if (typeof part.state.time.compacted === "number" && part.state.time.compacted > 0) continue
+      part.state.time.compacted = now
+      applied++
+    }
+  }
+  return applied
 }
 
 /**
@@ -351,6 +415,22 @@ const server: Plugin = async (input: PluginInput, rawOptions?: PluginOptions): P
   // Boot-time TTL cleanup (fail-open, async fire-and-forget).
   cleanupOldDumps(defaultDumpDir()).catch(() => undefined)
 
+  // Registry: prune sessions whose `compactedAt` is older than 30 days.
+  ;(async () => {
+    try {
+      const reg = await loadRegistry(options.registryPath)
+      const before = Object.keys(reg.sessions).length
+      if (before === 0) return
+      const { removed } = cleanupOldEntries(reg, REGISTRY_TTL_MS)
+      if (removed > 0) {
+        await saveRegistry(options.registryPath, reg)
+        log(options.logLevel, "info", `registry: pruned ${removed} stale session(s)`)
+      }
+    } catch {
+      // fail-open
+    }
+  })()
+
   const hooks: Hooks = {
     // -----------------------------------------------------------------------
     // Phase 1/2: stale invalidation transform hook
@@ -358,6 +438,28 @@ const server: Plugin = async (input: PluginInput, rawOptions?: PluginOptions): P
     "experimental.chat.messages.transform": async (_hookInput, output) => {
       try {
         if (!output || !Array.isArray(output.messages) || output.messages.length === 0) return
+
+        // Registry replay: applied unconditionally (regardless of warm-up
+        // gate or preserve* knobs). These are explicit user decisions made
+        // via ctxlite_compact and must take effect immediately.
+        const sessionID = extractSessionID(output.messages)
+        if (sessionID !== null) {
+          try {
+            const reg = await loadRegistry(options.registryPath)
+            const pending = getCompactedForSession(reg, sessionID)
+            const applied = applyRegistryCompactions(output.messages, pending)
+            if (applied > 0) {
+              log(
+                options.logLevel,
+                "info",
+                `registry: applied ${applied} pending compaction(s) for session ${sessionID}`,
+              )
+            }
+          } catch (regErr) {
+            const m = regErr instanceof Error ? `${regErr.name}: ${regErr.message}` : String(regErr)
+            log(options.logLevel, "info", `registry replay failed (fail-open) — ${m}`)
+          }
+        }
 
         if (output.messages.length < options.minMessagesForActivation) {
           log(
@@ -578,104 +680,38 @@ const server: Plugin = async (input: PluginInput, rawOptions?: PluginOptions): P
               })
             }
 
-            // Persist via direct HTTP PATCH to opencode API.
-            // v1 SDK exposes input.client._client (with patch/delete/get/post).
-            // v2 SDK exposes input.client.client (with patch/delete/get/post).
-            const now = Date.now()
-            let compacted = 0
-            let persisted = 0
-            const targetIds = new Set(plan.affectedItems.map((i) => i.part_id))
-            // Resolve HTTP client (SDK internal, fragile across versions).
-            // v1: input.client._client, v2: input.client.client.
-            const raw = input.client as unknown as {
-              _client?: { patch: Function }
-              client?: { patch: Function }
-            }
-            const http = raw._client ?? raw.client
+            // Persist via the on-disk registry. The transform hook reads it
+            // on every subsequent turn and re-applies the mutations to the
+            // outgoing payload. This works on both desktop and web because
+            // it doesn't depend on opencode's HTTP API at all.
+            const targetIds = plan.affectedItems.map((i) => i.part_id)
+            const reg = await loadRegistry(options.registryPath)
+            const { added, total } = addToRegistry(reg, sessionId, targetIds)
+            await saveRegistry(options.registryPath, reg)
 
-            // Guard: if no HTTP client found, abort non-dry-run compaction.
-            if (!dryRun && (!http || typeof http.patch !== "function")) {
-              return JSON.stringify({
-                error: "Cannot apply compaction: no HTTP client available in SDK",
-                _diag: {
-                  http_available: !!http,
-                  http_has_patch: typeof http?.patch === "function",
-                  session_id: sessionId,
-                  _note: raw._client
-                    ? "v1 (using _client)"
-                    : raw.client
-                      ? "v2 (using client)"
-                      : "ERROR: no HTTP client found",
-                },
-              })
-            }
-
-            for (const msg of rawMessages) {
-              for (const part of msg.parts) {
-                if (!isToolPart(part) || !isCompleted(part)) continue
-                const partId = (part as unknown as { id: string }).id
-                if (!targetIds.has(partId)) continue
-                if (typeof part.state.time.compacted === "number" && part.state.time.compacted > 0)
-                  continue
-
-                // Persist via HTTP PATCH FIRST, then mutate local copy.
-                // This prevents inconsistency where local state shows compacted
-                // but the server never received the update (PATCH failure).
-                // Send only the state delta (not the full Part with large output).
-                if (http?.patch) {
-                  const patchBody = {
-                    state: {
-                      time: { compacted: now },
-                    },
-                  }
-                  try {
-                    await http.patch({
-                      url: `/session/${sessionId}/message/${msg.info.id}/part/${partId}`,
-                      body: patchBody,
-                      headers: { "Content-Type": "application/json" },
-                    })
-                    persisted++
-                  } catch (updateErr) {
-                    console.error(
-                      `ctxlite_compact: failed to persist part ${partId}:`,
-                      updateErr instanceof Error ? updateErr.message : String(updateErr),
-                    )
-                    continue  // Skip local mutation on PATCH failure
-                  }
-                }
-
-                // PATCH succeeded (or no HTTP client in dry-run) → mutate local.
-                part.state.time.compacted = now
-                compacted++
-              }
-            }
-
-            // Note on HTTP client: the access pattern here (input.client._client vs .client)
-            // depends on opencode SDK internals and may break on SDK major version bumps.
-            // If the PATCH endpoint changes, the _diag field in the response will show
-            // `http_available: false` and compaction will be skipped.
+            // Also mutate the in-memory copy that the next transform-hook
+            // invocation will receive. This is best-effort; the registry
+            // is the source of truth.
+            const compacted = applyRegistryCompactions(
+              rawMessages as Array<{ parts: Part[] }>,
+              new Set(targetIds),
+            )
 
             log(
               options.logLevel,
               "info",
-              `ctxlite_compact: applied ${compacted} compaction(s), ${persisted} persisted, ~${plan.tokensRecoveredEstimate} tokens recovered`,
+              `ctxlite_compact: registered ${added} new partId(s), ` +
+                `${total} total in registry for this session, ` +
+                `${compacted} mutated in-memory, ~${plan.tokensRecoveredEstimate} tokens estimated`,
             )
 
             return JSON.stringify({
               mode: "applied",
-              compacted,
-              persisted,
+              registered: added,
+              total_in_registry: total,
+              compacted_in_memory: compacted,
               tokens_recovered_estimate: plan.tokensRecoveredEstimate,
-              _diag: {
-                http_available: !!http,
-                http_has_patch: typeof http?.patch === "function",
-                session_id: sessionId,
-                _note: raw._client
-                  ? "v1 (using _client)"
-                  : raw.client
-                    ? "v2 (using client)"
-                    : "ERROR: no HTTP client found",
-              },
+              registry_path: options.registryPath,
             })
           } catch (err) {
             return JSON.stringify({

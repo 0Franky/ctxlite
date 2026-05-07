@@ -81,6 +81,37 @@ All options are optional; defaults are applied when omitted.
 | `preserveRecentMessages` | `number` | `0` | Number of most-recent messages whose ToolParts ctxlite skips entirely. Defensive option for users who fear race conditions; the default is fine. |
 | `preserveOldestMessages` | `number` | `0` | Number of OLDEST messages whose ToolParts ctxlite never touches. **Cache-friendly knob** — see "Prompt cache trade-off" below. |
 | `minMessagesForActivation` | `number` | `0` | Don't run the transform hook until the session has at least N messages. Lets the prompt cache warm up before ctxlite starts taking bites out of it. |
+| `registryPath` | `string` | `~/.ctxlite/compactions.json` | Where to persist the on-disk compaction registry used by `ctxlite_compact`. See **"How `ctxlite_compact` persists"** below. |
+
+## How `ctxlite_compact` persists
+
+opencode does not (today) expose an HTTP endpoint or SDK method to mutate `state.time.compacted` on a single message Part. The earlier ctxlite tried `_client.patch("/session/.../message/.../part/...")` against a phantom endpoint that doesn't exist — silently failing on **opencode desktop** (and likely on web too) while reporting `persisted: N` to the caller.
+
+Starting from `0.2.0` ctxlite uses an **on-disk registry**:
+
+```
+ctxlite_compact (called by the agent)
+   ↓ writes
+~/.ctxlite/compactions.json   ← Map<sessionID, { partIds[], compactedAt }>
+   ↓ reads
+transform hook (called by opencode every turn, BEFORE the LLM call)
+   ↓ mutates state.time.compacted in-place on the outgoing payload
+opencode renders "[Old tool result content cleared]"
+```
+
+This works on **both opencode desktop and opencode web**, because it doesn't depend on opencode's HTTP API at all — only on the `experimental.chat.messages.transform` hook, which is part of the universal plugin contract.
+
+Properties:
+
+- **Persistent across restarts.** The registry is on disk; closing and reopening opencode preserves the compactions.
+- **Idempotent.** Replaying the same registry on already-compacted parts is a no-op (`state.time.compacted > 0` short-circuits).
+- **Atomic.** `saveRegistry` writes to `<path>.tmp` and renames; a crash mid-write can't leave a half-truncated JSON.
+- **Fail-open.** A corrupt or missing registry file degrades to "no pending compactions" — opencode keeps running without ctxlite getting in the way.
+- **Per-session isolation.** Sessions are keyed by `sessionID`; mutations from session A never leak into session B.
+- **TTL.** At plugin boot, sessions whose `compactedAt` is older than 30 days are pruned automatically.
+- **Override-friendly.** Set `registryPath` in the plugin config if you want a project-local file or a shared registry across multiple opencode installs.
+
+The registry is **append-only by design**: `ctxlite_compact` adds partIds; nothing in the plugin removes them except the 30-day TTL. The agent can revoke a compaction by deleting the file, editing the JSON manually, or just letting the TTL expire.
 
 ## Prompt cache trade-off
 
@@ -157,7 +188,7 @@ bun test           # run the full suite
 bun run typecheck  # typecheck only
 ```
 
-**85 tests across 8 files.** One pre-existing failure on `duplicate-bash` (fixture shares `messageIdx`, unrelated to recent changes); the remaining 84 pass.
+**118 tests across 10 files.** One pre-existing failure on `duplicate-bash` (fixture shares `messageIdx`, unrelated to recent changes); the remaining 117 pass.
 
 | File | Coverage |
 |------|----------|
@@ -169,6 +200,8 @@ bun run typecheck  # typecheck only
 | `flag-heuristics.test.ts` | dead-reasoning, superseded-tool-result, large-error, oversized-bash-output, duplicate-text |
 | `smoke-integration.test.ts` | end-to-end against real `@opencode-ai/sdk` types: read→edit→read mutation, idempotency, fail-open on malformed input, running-tool isolation, **`preserveOldestMessages`**, **`minMessagesForActivation`** |
 | `cache-friendly.test.ts` | exhaustive matrix for the cache-friendly knobs: protected-prefix invariant, warm-up gate, knob interaction grid (8 combinations), invalid-input coercion, byte-stable re-runs |
+| `registry.test.ts` | **registry persistence**: defensive load (missing file, empty file, invalid JSON, wrong version, malformed entries), atomic save (tmp+rename), idempotent merge, per-session isolation, TTL cleanup with boundary case, default path under `$HOME/.ctxlite/` |
+| `compact-persistence.test.ts` | **end-to-end registry replay** against real SDK types: registry entry → transform mutates the matching part; replay unaffected by `minMessagesForActivation` and `preserveOldestMessages` (explicit user decisions take precedence); cross-session isolation; idempotent re-runs; missing/corrupt registry are no-ops; **simulated restart** (new plugin instance reads the same on-disk file and applies pending compactions) |
 
 ### What the tests verify
 
