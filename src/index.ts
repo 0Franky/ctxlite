@@ -531,6 +531,21 @@ const server: Plugin = async (input: PluginInput, rawOptions?: PluginOptions): P
               parts: Part[]
             }>
 
+            // Cross-reference the registry: parts pending compaction count as
+            // "already compacted" in the dump. The server doesn't know about
+            // them (the registry is local), so without this the dump would
+            // misreport `n_already_compacted: 0` while the LLM is actually
+            // seeing them as "[Old tool result content cleared]".
+            try {
+              const reg = await loadRegistry(options.registryPath)
+              const pending = getCompactedForSession(reg, sessionId)
+              if (pending.size > 0) {
+                applyRegistryCompactions(rawMessages, pending)
+              }
+            } catch {
+              // fail-open: dump still works on the un-overlaid view.
+            }
+
             const dumpMessages = toRawMessages(rawMessages)
             const dumpData = buildDump(dumpMessages, sessionId, {
               verbosity,
